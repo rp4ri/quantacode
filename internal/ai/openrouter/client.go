@@ -85,23 +85,42 @@ func (c *Client) WithModel(model string) *Client {
 	return c
 }
 
-func (c *Client) buildSystemPrompt(symbol string, price float64, rsi, sma, ema float64) string {
-	return fmt.Sprintf(`Eres un analista de trading experto especializado en criptomonedas. 
-Estás analizando %s en tiempo real.
+// IndicatorHistory contains historical values for indicators
+type IndicatorHistory struct {
+	RSI []float64
+	SMA []float64
+	EMA []float64
+}
+
+func (c *Client) buildSystemPrompt(symbol string, price float64, rsi, sma, ema float64, history *IndicatorHistory) string {
+	historyStr := ""
+	if history != nil && len(history.RSI) > 0 {
+		historyStr = "\n\nHistorial de indicadores (últimas velas, de más antigua a más reciente):\n"
+		historyStr += "| # | RSI | SMA | EMA |\n"
+		historyStr += "|---|-----|-----|-----|\n"
+		for i := 0; i < len(history.RSI); i++ {
+			historyStr += fmt.Sprintf("| %d | %.2f | %.2f | %.2f |\n", i+1, history.RSI[i], history.SMA[i], history.EMA[i])
+		}
+	}
+
+	return fmt.Sprintf(`Eres un asistente de trading para criptomonedas. Estás monitoreando %s.
 
 Datos actuales del mercado:
 - Precio: $%.2f
 - RSI (14): %.2f
 - SMA (14): %.2f  
 - EMA (14): %.2f
-
-Proporciona análisis técnico conciso y accionable. Responde en español.
-Sé directo y específico sobre señales de compra/venta basándote en los indicadores.`, 
-		symbol, price, rsi, sma, ema)
+%s
+IMPORTANTE: 
+- Solo proporciona análisis técnico cuando el usuario lo solicite explícitamente (palabras como "analiza", "análisis", "qué opinas del mercado", "señales", etc.)
+- Si el usuario hace una pregunta general o saluda, responde normalmente sin dar análisis no solicitado.
+- Cuando des análisis, sé conciso y accionable basándote en los indicadores y su historial.
+- Responde siempre en español.`, 
+		symbol, price, rsi, sma, ema, historyStr)
 }
 
-func (c *Client) StreamAnalysis(ctx context.Context, userPrompt, symbol string, price, rsi, sma, ema float64) (<-chan StreamChunk, error) {
-	systemPrompt := c.buildSystemPrompt(symbol, price, rsi, sma, ema)
+func (c *Client) StreamAnalysis(ctx context.Context, userPrompt, symbol string, price, rsi, sma, ema float64, history *IndicatorHistory) (<-chan StreamChunk, error) {
+	systemPrompt := c.buildSystemPrompt(symbol, price, rsi, sma, ema, history)
 	
 	messages := []Message{
 		{Role: "system", Content: systemPrompt},

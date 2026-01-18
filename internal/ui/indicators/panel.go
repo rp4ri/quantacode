@@ -63,14 +63,11 @@ func (p Panel) View(vals domainindicators.AggregatedValues) string {
         Render(strings.Repeat("─", p.width-2))
 
     currentSection := p.renderCurrentValues(vals)
-    historySection := p.renderHistory()
 
     content := lipgloss.JoinVertical(lipgloss.Left,
         title,
         border,
         currentSection,
-        "",
-        historySection,
     )
 
     return lipgloss.NewStyle().

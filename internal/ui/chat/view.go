@@ -23,6 +23,22 @@ const (
     brandName = "QuantaCode"
 )
 
+var availablePairs = []string{
+    "btcusdt", "ethusdt", "bnbusdt", "xrpusdt", "adausdt",
+    "dogeusdt", "solusdt", "dotusdt", "maticusdt", "ltcusdt",
+    "avaxusdt", "linkusdt", "atomusdt", "uniusdt", "xlmusdt",
+}
+
+type slashCommand struct {
+    name        string
+    description string
+}
+
+var slashCommands = []slashCommand{
+    {name: "/clear", description: "Limpiar historial del chat"},
+    {name: "/pairs", description: "Cambiar par de trading"},
+}
+
 // Config contains runtime configuration for the chat UI.
 type Config struct {
     ServerAddr    string
@@ -41,7 +57,7 @@ func Run(ctx context.Context, cfg Config) error {
     panel := indicatorpanel.NewPanel()
     model := newModel(cfg, panel)
 
-    program := tea.NewProgram(model, tea.WithAltScreen(), tea.WithContext(ctx))
+    program := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithContext(ctx))
     _, err := program.Run()
     return err
 }
@@ -74,6 +90,14 @@ type model struct {
     streamingMsg    string
     aiStreamCh      <-chan openrouter.StreamChunk
     logger          *logging.Logger
+    indicatorHistory *openrouter.IndicatorHistory
+    
+    inputHistory      []string
+    historyIndex      int
+    showPairSelect    bool
+    pairSelectIndex   int
+    showSlashMenu     bool
+    slashMenuIndex    int
 }
 
 type chatMessage struct {
@@ -88,7 +112,7 @@ func newModel(cfg Config, panel indicatorpanel.Panel) model {
     ti.Focus()
     ti.Prompt = "› "
     ti.CharLimit = 500
-    ti.SetHeight(1)
+    ti.SetHeight(3)
     ti.ShowLineNumbers = false
     ti.FocusedStyle.CursorLine = lipgloss.NewStyle()
     ti.BlurredStyle.CursorLine = lipgloss.NewStyle()
@@ -97,6 +121,7 @@ func newModel(cfg Config, panel indicatorpanel.Panel) model {
 
     vp := viewport.New(80, 20)
     vp.Style = lipgloss.NewStyle()
+    vp.MouseWheelEnabled = true
 
     var aiClient *openrouter.Client
     if cfg.OpenRouterKey != "" {
@@ -164,14 +189,14 @@ type aiStreamChunkMsg struct {
     streamCh <-chan openrouter.StreamChunk
 }
 
-func startAIStreamCmd(client *openrouter.Client, prompt, symbol string, price, rsi, sma, ema float64) tea.Cmd {
+func startAIStreamCmd(client *openrouter.Client, prompt, symbol string, price, rsi, sma, ema float64, history *openrouter.IndicatorHistory) tea.Cmd {
     return func() tea.Msg {
         if client == nil {
             return aiStreamChunkMsg{content: "Error: API key no configurada", done: true}
         }
 
         ctx := context.Background()
-        chunkCh, err := client.StreamAnalysis(ctx, prompt, symbol, price, rsi, sma, ema)
+        chunkCh, err := client.StreamAnalysis(ctx, prompt, symbol, price, rsi, sma, ema, history)
         if err != nil {
             return aiStreamChunkMsg{err: err, done: true}
         }
@@ -249,7 +274,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
             m.textarea.SetWidth(contentWidth - 4)
         }
         headerHeight := 3
-        inputHeight := 3
+        inputHeight := 5
         chatHeight := m.height - headerHeight - inputHeight - 2
         if chatHeight < 5 {
             chatHeight = 5
@@ -259,9 +284,80 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         m.updateViewportContent()
 
     case tea.KeyMsg:
+        // Handle pair selection modal
+        if m.showPairSelect {
+            switch msg.Type {
+            case tea.KeyEsc:
+                m.showPairSelect = false
+            case tea.KeyUp:
+                if m.pairSelectIndex > 0 {
+                    m.pairSelectIndex--
+                }
+            case tea.KeyDown:
+                if m.pairSelectIndex < len(availablePairs)-1 {
+                    m.pairSelectIndex++
+                }
+            case tea.KeyEnter:
+                selectedPair := availablePairs[m.pairSelectIndex]
+                m.showPairSelect = false
+                m.cfg.Symbol = selectedPair
+                m.messages = append(m.messages, chatMessage{author: "Sistema", content: fmt.Sprintf("Cambiando a par: %s", strings.ToUpper(selectedPair)), timestamp: time.Now()})
+                if m.grpcClient != nil {
+                    cmds = append(cmds, startStreamCmd(m.grpcClient, selectedPair))
+                }
+            }
+            break
+        }
+        
+        // Handle slash command menu
+        if m.showSlashMenu {
+            switch msg.Type {
+            case tea.KeyEsc:
+                m.showSlashMenu = false
+            case tea.KeyUp:
+                if m.slashMenuIndex > 0 {
+                    m.slashMenuIndex--
+                }
+            case tea.KeyDown:
+                if m.slashMenuIndex < len(slashCommands)-1 {
+                    m.slashMenuIndex++
+                }
+            case tea.KeyEnter, tea.KeyTab:
+                m.textarea.SetValue(slashCommands[m.slashMenuIndex].name)
+                m.showSlashMenu = false
+            default:
+                var cmd tea.Cmd
+                m.textarea, cmd = m.textarea.Update(msg)
+                cmds = append(cmds, cmd)
+                // Check if still typing a slash command
+                val := m.textarea.Value()
+                if !strings.HasPrefix(val, "/") || strings.Contains(val, " ") {
+                    m.showSlashMenu = false
+                }
+            }
+            break
+        }
+        
         switch msg.Type {
         case tea.KeyCtrlC, tea.KeyEsc:
             return m, tea.Quit
+        case tea.KeyUp:
+            if len(m.inputHistory) > 0 && m.historyIndex > 0 {
+                m.historyIndex--
+                m.textarea.SetValue(m.inputHistory[m.historyIndex])
+            }
+        case tea.KeyDown:
+            if len(m.inputHistory) > 0 && m.historyIndex < len(m.inputHistory)-1 {
+                m.historyIndex++
+                m.textarea.SetValue(m.inputHistory[m.historyIndex])
+            } else if m.historyIndex >= len(m.inputHistory)-1 {
+                m.historyIndex = len(m.inputHistory)
+                m.textarea.SetValue("")
+            }
+        case tea.KeyPgUp:
+            m.viewport.LineUp(5)
+        case tea.KeyPgDown:
+            m.viewport.LineDown(5)
         case tea.KeyEnter:
             if m.typing {
                 break
@@ -270,20 +366,64 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
             if input == "" {
                 break
             }
+            
+            // Handle slash commands
+            if strings.HasPrefix(input, "/") {
+                cmd := strings.ToLower(input)
+                switch {
+                case cmd == "/clear":
+                    m.messages = nil
+                    m.textarea.Reset()
+                    m.updateViewportContent()
+                    break
+                case cmd == "/pairs":
+                    m.showPairSelect = true
+                    m.pairSelectIndex = 0
+                    for i, p := range availablePairs {
+                        if p == strings.ToLower(m.cfg.Symbol) {
+                            m.pairSelectIndex = i
+                            break
+                        }
+                    }
+                    m.textarea.Reset()
+                    break
+                default:
+                    m.messages = append(m.messages, chatMessage{author: "Sistema", content: "Comandos disponibles: /clear, /pairs", timestamp: time.Now()})
+                    m.textarea.Reset()
+                }
+                break
+            }
+            
+            m.inputHistory = append(m.inputHistory, input)
+            m.historyIndex = len(m.inputHistory)
             m.logger.LogIO("User input", input, nil, 0)
             m.messages = append(m.messages, chatMessage{author: "Tú", content: input, timestamp: time.Now()})
             m.textarea.Reset()
             m.typing = true
             m.streamingMsg = ""
-            cmds = append(cmds, startAIStreamCmd(m.aiClient, input, m.cfg.Symbol, m.currentPrice, m.indicatorValues.RSI, m.indicatorValues.SMA, m.indicatorValues.EMA))
+            cmds = append(cmds, startAIStreamCmd(m.aiClient, input, m.cfg.Symbol, m.currentPrice, m.indicatorValues.RSI, m.indicatorValues.SMA, m.indicatorValues.EMA, m.indicatorHistory))
         default:
             var cmd tea.Cmd
             m.textarea, cmd = m.textarea.Update(msg)
             cmds = append(cmds, cmd)
+            
+            // Check if user just typed "/" to show slash menu
+            val := m.textarea.Value()
+            if val == "/" {
+                m.showSlashMenu = true
+                m.slashMenuIndex = 0
+            } else if strings.HasPrefix(val, "/") && !strings.Contains(val, " ") && len(val) > 1 {
+                // Filter commands based on input
+                m.showSlashMenu = true
+            } else {
+                m.showSlashMenu = false
+            }
         }
 
     case tea.MouseMsg:
         var cmd tea.Cmd
+        m.viewport, cmd = m.viewport.Update(msg)
+        cmds = append(cmds, cmd)
         m.textarea, cmd = m.textarea.Update(msg)
         cmds = append(cmds, cmd)
 
@@ -318,6 +458,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
             EMA: msg.emaHistory,
         }
         m.panel = m.panel.WithHistory(history)
+        m.indicatorHistory = &openrouter.IndicatorHistory{
+            RSI: msg.rsiHistory,
+            SMA: msg.smaHistory,
+            EMA: msg.emaHistory,
+        }
         if m.priceCh != nil {
             cmds = append(cmds, waitForUpdateCmd(m.priceCh, m.indicatorCh))
         }
@@ -457,6 +602,10 @@ func (m model) View() string {
             Render(" Cargando " + brandName + "...")
     }
 
+    if m.showPairSelect {
+        return m.renderPairSelect()
+    }
+
     contentWidth := m.contentWidth()
     
     headerView := m.renderHeader(contentWidth)
@@ -479,6 +628,41 @@ func (m model) View() string {
     panelView := m.panel.View(m.indicatorValues)
 
     return lipgloss.JoinHorizontal(lipgloss.Top, leftBox, panelView)
+}
+
+func (m model) renderPairSelect() string {
+    title := lipgloss.NewStyle().
+        Bold(true).
+        Foreground(highlight).
+        Render("◆ Seleccionar Par de Trading")
+    
+    subtitle := lipgloss.NewStyle().
+        Foreground(dimText).
+        Render("Usa ↑/↓ para navegar, Enter para seleccionar, Esc para cancelar\n")
+    
+    var items strings.Builder
+    for i, pair := range availablePairs {
+        cursor := "  "
+        style := lipgloss.NewStyle().Foreground(dimText)
+        if i == m.pairSelectIndex {
+            cursor = "› "
+            style = lipgloss.NewStyle().Bold(true).Foreground(highlight)
+        }
+        if strings.ToLower(m.cfg.Symbol) == pair {
+            items.WriteString(cursor + style.Render(strings.ToUpper(pair)+" (actual)") + "\n")
+        } else {
+            items.WriteString(cursor + style.Render(strings.ToUpper(pair)) + "\n")
+        }
+    }
+    
+    box := lipgloss.NewStyle().
+        Border(lipgloss.RoundedBorder()).
+        BorderForeground(highlight).
+        Padding(1, 2).
+        Width(40).
+        Render(lipgloss.JoinVertical(lipgloss.Left, title, subtitle, items.String()))
+    
+    return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
 }
 
 func (m model) renderHeader(width int) string {
@@ -534,13 +718,54 @@ func (m model) renderInput(width int) string {
         Foreground(subtle).
         Render(strings.Repeat("─", width))
     
+    var slashMenu string
+    if m.showSlashMenu {
+        slashMenu = m.renderSlashMenu()
+    }
+    
     prompt := lipgloss.NewStyle().
         Foreground(highlight).
         Render("› ")
     
     input := m.textarea.View()
     
-    return border + "\n" + prompt + input
+    return border + "\n" + slashMenu + prompt + input
+}
+
+func (m model) renderSlashMenu() string {
+    var items strings.Builder
+    inputVal := strings.ToLower(m.textarea.Value())
+    
+    for i, cmd := range slashCommands {
+        // Filter based on what user typed
+        if inputVal != "/" && !strings.HasPrefix(cmd.name, inputVal) {
+            continue
+        }
+        
+        cursor := "  "
+        nameStyle := lipgloss.NewStyle().Foreground(dimText)
+        descStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#666666"))
+        
+        if i == m.slashMenuIndex {
+            cursor = "› "
+            nameStyle = lipgloss.NewStyle().Bold(true).Foreground(highlight)
+            descStyle = lipgloss.NewStyle().Foreground(dimText)
+        }
+        
+        items.WriteString(cursor + nameStyle.Render(cmd.name) + " " + descStyle.Render(cmd.description) + "\n")
+    }
+    
+    if items.Len() == 0 {
+        return ""
+    }
+    
+    box := lipgloss.NewStyle().
+        Border(lipgloss.RoundedBorder()).
+        BorderForeground(subtle).
+        Padding(0, 1).
+        Render(items.String())
+    
+    return box + "\n"
 }
 
 func (m model) renderTyping() string {

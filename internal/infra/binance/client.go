@@ -61,16 +61,11 @@ func (c *Client) Subscribe() <-chan PriceUpdate {
 }
 
 // Connect establishes WebSocket connection and starts reading.
+// Tries binance.us first (for US servers), then falls back to binance.com
 func (c *Client) Connect(ctx context.Context) error {
 	if c.simulate {
 		go c.simulateLoop(ctx)
 		return nil
-	}
-
-	wsURL := url.URL{
-		Scheme: "wss",
-		Host:   "stream.binance.com:9443",
-		Path:   fmt.Sprintf("/ws/%s@ticker", c.symbol),
 	}
 
 	dialer := websocket.Dialer{
@@ -80,14 +75,32 @@ func (c *Client) Connect(ctx context.Context) error {
 	header := make(map[string][]string)
 	header["User-Agent"] = []string{"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
-	var err error
-	c.conn, _, err = dialer.DialContext(ctx, wsURL.String(), header)
-	if err != nil {
-		return fmt.Errorf("connect to binance: %w", err)
+	// Try binance.us first (for US-based servers)
+	endpoints := []string{
+		"stream.binance.us:9443",
+		"stream.binance.com:9443",
 	}
 
-	go c.readLoop(ctx)
-	return nil
+	var lastErr error
+	for _, host := range endpoints {
+		wsURL := url.URL{
+			Scheme: "wss",
+			Host:   host,
+			Path:   fmt.Sprintf("/ws/%s@ticker", c.symbol),
+		}
+
+		conn, _, err := dialer.DialContext(ctx, wsURL.String(), header)
+		if err == nil {
+			c.conn = conn
+			log.Printf("connected to binance via %s", host)
+			go c.readLoop(ctx)
+			return nil
+		}
+		lastErr = err
+		log.Printf("failed to connect to %s: %v, trying next...", host, err)
+	}
+
+	return fmt.Errorf("connect to binance (tried all endpoints): %w", lastErr)
 }
 
 func (c *Client) simulateLoop(ctx context.Context) {
@@ -221,26 +234,33 @@ func (c *Client) Close() error {
 }
 
 type tickerMessage struct {
-	Symbol string `json:"s"`
-	Price  string `json:"c"`
-	Volume string `json:"v"`
-	Time   int64  `json:"E"`
+	Symbol string      `json:"s"`
+	Price  string      `json:"c"`
+	Volume string      `json:"v"`
+	Time   json.Number `json:"E"`
 }
 
 func parseTicker(data []byte) (PriceUpdate, error) {
 	var msg tickerMessage
 	if err := json.Unmarshal(data, &msg); err != nil {
-		return PriceUpdate{}, err
+		return PriceUpdate{}, fmt.Errorf("unmarshal ticker: %w", err)
 	}
 
 	var price, volume float64
 	fmt.Sscanf(msg.Price, "%f", &price)
 	fmt.Sscanf(msg.Volume, "%f", &volume)
 
+	timestamp := time.Now()
+	if msg.Time != "" {
+		if ts, err := msg.Time.Int64(); err == nil {
+			timestamp = time.UnixMilli(ts)
+		}
+	}
+
 	return PriceUpdate{
 		Symbol:    msg.Symbol,
 		Price:     price,
 		Volume:    volume,
-		Timestamp: time.UnixMilli(msg.Time),
+		Timestamp: timestamp,
 	}, nil
 }

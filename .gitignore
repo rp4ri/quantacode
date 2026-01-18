@@ -53,8 +53,11 @@ Desktop.ini
 # Node (if any frontend)
 node_modules/
 
-# Proto generated (optional - uncomment if you want to regenerate)
-# proto/*.pb.go
+# Proto generated files (regenerate with: protoc --go_out=. --go-grpc_out=. proto/*.proto)
+proto/*.pb.go
+
+# Incorrectly generated proto paths
+github.com/
 
 # Debug
 __debug_bin*

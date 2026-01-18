@@ -75,7 +75,7 @@ func Init(logPath string, minLevel LogLevel) error {
 
 		globalLogger = &Logger{
 			file:     file,
-			writer:   io.MultiWriter(file, os.Stdout),
+			writer:   file,
 			minLevel: minLevel,
 			module:   "global",
 		}
@@ -86,7 +86,7 @@ func Init(logPath string, minLevel LogLevel) error {
 func GetLogger(module string) *Logger {
 	if globalLogger == nil {
 		return &Logger{
-			writer:   os.Stdout,
+			writer:   io.Discard,
 			minLevel: DEBUG,
 			module:   module,
 		}

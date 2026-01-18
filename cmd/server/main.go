@@ -33,14 +33,10 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	// Initialize Binance client (try real, fallback to simulated)
+	// Initialize Binance client (tries binance.us first, then binance.com)
 	binanceClient := binance.NewClient(symbol)
 	if err := binanceClient.Connect(ctx); err != nil {
-		log.Printf("failed to connect to binance: %v, using simulated data", err)
-		binanceClient = binance.NewSimulatedClient(symbol)
-		if err := binanceClient.Connect(ctx); err != nil {
-			log.Fatalf("failed to start simulated client: %v", err)
-		}
+		log.Fatalf("failed to connect to binance: %v", err)
 	}
 	defer binanceClient.Close()
 
