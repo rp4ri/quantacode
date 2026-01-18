@@ -14,7 +14,6 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/yourusername/quantacode/internal/grpc/server"
-	"github.com/yourusername/quantacode/internal/infra/binance"
 	pb "github.com/yourusername/quantacode/proto"
 )
 
@@ -33,15 +32,8 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	// Initialize Binance client (tries binance.us first, then binance.com)
-	binanceClient := binance.NewClient(symbol)
-	if err := binanceClient.Connect(ctx); err != nil {
-		log.Fatalf("failed to connect to binance: %v", err)
-	}
-	defer binanceClient.Close()
-
-	// Create gRPC server
-	handler := server.NewHandler(binanceClient)
+	// Create gRPC server (Binance connections are created per-stream)
+	handler := server.NewHandler(symbol)
 	grpcServer := grpc.NewServer()
 	pb.RegisterMarketDataServiceServer(grpcServer, handler)
 

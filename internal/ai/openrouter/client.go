@@ -103,7 +103,12 @@ func (c *Client) buildSystemPrompt(symbol string, price float64, rsi, sma, ema f
 		}
 	}
 
+	// Get current time in UTC and common trading timezones
+	now := time.Now().UTC()
+	
 	return fmt.Sprintf(`Eres un asistente de trading para criptomonedas. Estás monitoreando %s.
+
+Hora actual: %s UTC (%s hora del Este, %s hora del Pacífico)
 
 Datos actuales del mercado:
 - Precio: $%.2f
@@ -115,8 +120,13 @@ IMPORTANTE:
 - Solo proporciona análisis técnico cuando el usuario lo solicite explícitamente (palabras como "analiza", "análisis", "qué opinas del mercado", "señales", etc.)
 - Si el usuario hace una pregunta general o saluda, responde normalmente sin dar análisis no solicitado.
 - Cuando des análisis, sé conciso y accionable basándote en los indicadores y su historial.
+- Tienes acceso a la hora actual y puedes responder preguntas sobre el tiempo.
 - Responde siempre en español.`, 
-		symbol, price, rsi, sma, ema, historyStr)
+		symbol,
+		now.Format("2006-01-02 15:04:05"),
+		now.Add(-5*time.Hour).Format("15:04"),
+		now.Add(-8*time.Hour).Format("15:04"),
+		price, rsi, sma, ema, historyStr)
 }
 
 func (c *Client) StreamAnalysis(ctx context.Context, userPrompt, symbol string, price, rsi, sma, ema float64, history *IndicatorHistory) (<-chan StreamChunk, error) {

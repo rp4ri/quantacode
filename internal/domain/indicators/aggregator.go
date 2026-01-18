@@ -22,15 +22,17 @@ type IndicatorHistory struct {
 
 // Aggregator coordinates price updates across indicators and tracks recent prices.
 type Aggregator struct {
-	prices     *CircularBuffer
-	rsi        *RSI
-	sma        *SMA
-	ema        *EMA
-	last       AggregatedValues
-	rsiHistory []float64
-	smaHistory []float64
-	emaHistory []float64
+	prices       *CircularBuffer
+	rsi          *RSI
+	sma          *SMA
+	ema          *EMA
+	last         AggregatedValues
+	rsiHistory   []float64
+	smaHistory   []float64
+	emaHistory   []float64
 	priceHistory []float64
+	lastPrice    float64
+	updateCount  int
 }
 
 // NewAggregator constructs an Aggregator with the provided indicator periods.
@@ -65,7 +67,19 @@ func NewAggregator(rsiPeriod, smaPeriod, emaPeriod int) (*Aggregator, error) {
 }
 
 // Update ingests a price, updates all indicators, and returns aggregated values.
+// Only updates RSI when price actually changes to avoid false RSI=100 readings.
 func (a *Aggregator) Update(price float64) AggregatedValues {
+	a.updateCount++
+	
+	// Only update indicators when price changes (or first update)
+	priceChanged := a.lastPrice == 0 || price != a.lastPrice
+	a.lastPrice = price
+	
+	if !priceChanged {
+		// Price unchanged - return last values without updating RSI
+		return a.last
+	}
+	
 	a.prices.Push(price)
 	rsiVal := a.rsi.Update(price)
 	smaVal := a.sma.Update(price)
@@ -88,6 +102,23 @@ func (a *Aggregator) Update(price float64) AggregatedValues {
 // Values returns the most recently computed aggregate values.
 func (a *Aggregator) Values() AggregatedValues {
 	return a.last
+}
+
+// Ready returns true if sufficient data has been collected for meaningful indicators.
+func (a *Aggregator) Ready() bool {
+	return len(a.priceHistory) >= a.rsi.Period()
+}
+
+// WarmupProgress returns the warmup progress as a fraction (0.0 to 1.0).
+func (a *Aggregator) WarmupProgress() float64 {
+	if a.rsi.Period() == 0 {
+		return 1.0
+	}
+	progress := float64(len(a.priceHistory)) / float64(a.rsi.Period())
+	if progress > 1.0 {
+		return 1.0
+	}
+	return progress
 }
 
 // History returns the historical values for all indicators.

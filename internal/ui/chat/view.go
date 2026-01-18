@@ -122,6 +122,8 @@ func newModel(cfg Config, panel indicatorpanel.Panel) model {
     vp := viewport.New(80, 20)
     vp.Style = lipgloss.NewStyle()
     vp.MouseWheelEnabled = true
+    vp.MouseWheelDelta = 3
+    vp.YPosition = 0
 
     var aiClient *openrouter.Client
     if cfg.OpenRouterKey != "" {
@@ -299,8 +301,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
                 }
             case tea.KeyEnter:
                 selectedPair := availablePairs[m.pairSelectIndex]
+                oldPair := m.cfg.Symbol
                 m.showPairSelect = false
                 m.cfg.Symbol = selectedPair
+                // Reset price and indicators for new pair
+                m.currentPrice = 0
+                m.prevPrice = 0
+                m.priceChange = 0
+                m.indicatorValues = domainindicators.AggregatedValues{}
+                m.indicatorHistory = nil
+                m.priceCh = nil
+                m.indicatorCh = nil
+                m.logger.LogPairSwitch(oldPair, selectedPair)
                 m.messages = append(m.messages, chatMessage{author: "Sistema", content: fmt.Sprintf("Cambiando a par: %s", strings.ToUpper(selectedPair)), timestamp: time.Now()})
                 if m.grpcClient != nil {
                     cmds = append(cmds, startStreamCmd(m.grpcClient, selectedPair))
@@ -362,21 +374,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
             if m.typing {
                 break
             }
-            input := strings.TrimSpace(m.textarea.Value())
+            input := strings.TrimSpace(strings.ReplaceAll(m.textarea.Value(), "\n", ""))
             if input == "" {
                 break
             }
             
             // Handle slash commands
             if strings.HasPrefix(input, "/") {
-                cmd := strings.ToLower(input)
+                cmd := strings.ToLower(strings.TrimSpace(input))
                 switch {
-                case cmd == "/clear":
+                case cmd == "/clear" || strings.HasPrefix(cmd, "/clear "):
                     m.messages = nil
                     m.textarea.Reset()
                     m.updateViewportContent()
                     break
-                case cmd == "/pairs":
+                case cmd == "/pairs" || strings.HasPrefix(cmd, "/pairs "):
                     m.showPairSelect = true
                     m.pairSelectIndex = 0
                     for i, p := range availablePairs {
@@ -421,11 +433,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         }
 
     case tea.MouseMsg:
-        var cmd tea.Cmd
-        m.viewport, cmd = m.viewport.Update(msg)
-        cmds = append(cmds, cmd)
-        m.textarea, cmd = m.textarea.Update(msg)
-        cmds = append(cmds, cmd)
+        // Always forward mouse messages to viewport for scroll handling
+        var vpCmd tea.Cmd
+        m.viewport, vpCmd = m.viewport.Update(msg)
+        cmds = append(cmds, vpCmd)
 
     case connectedMsg:
         m.grpcClient = msg.client
@@ -442,6 +453,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         m.prevPrice = m.currentPrice
         m.currentPrice = msg.price
         m.priceChange = m.currentPrice - m.prevPrice
+        m.logger.LogPriceUpdate(msg.symbol, msg.price, 0)
         if m.priceCh != nil {
             cmds = append(cmds, waitForUpdateCmd(m.priceCh, m.indicatorCh))
         }
@@ -452,6 +464,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
             SMA: msg.sma,
             EMA: msg.ema,
         }
+        m.logger.LogIndicatorUpdate(msg.rsi, msg.sma, msg.ema)
         history := domainindicators.IndicatorHistory{
             RSI: msg.rsiHistory,
             SMA: msg.smaHistory,
@@ -625,6 +638,11 @@ func (m model) View() string {
         Height(m.height).
         Render(leftContent)
     
+    // Only show indicator panel if terminal is wide enough
+    if m.panelWidth() == 0 {
+        return leftBox
+    }
+    
     panelView := m.panel.View(m.indicatorValues)
 
     return lipgloss.JoinHorizontal(lipgloss.Top, leftBox, panelView)
@@ -788,6 +806,10 @@ func (m model) contentWidth() int {
 }
 
 func (m model) panelWidth() int {
+    // Hide panel if terminal too narrow (< 100 columns)
+    if m.width < 100 {
+        return 0
+    }
     if m.width == 0 {
         return 32
     }

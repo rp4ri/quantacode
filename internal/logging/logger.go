@@ -155,6 +155,37 @@ func (l *Logger) LogOpenRouterCall(input interface{}, output interface{}, err er
 	l.log(level, "OpenRouter API call", input, output, err, duration)
 }
 
+// LogPriceUpdate logs incoming price updates from Binance
+func (l *Logger) LogPriceUpdate(symbol string, price, volume float64) {
+	l.log(DEBUG, "Price update", map[string]interface{}{
+		"symbol": symbol,
+		"price":  price,
+		"volume": volume,
+	}, nil, nil, 0)
+}
+
+// LogIndicatorUpdate logs calculated indicator values
+func (l *Logger) LogIndicatorUpdate(rsi, sma, ema float64) {
+	l.log(DEBUG, "Indicator update", map[string]interface{}{
+		"rsi": rsi,
+		"sma": sma,
+		"ema": ema,
+	}, nil, nil, 0)
+}
+
+// LogConnection logs connection events
+func (l *Logger) LogConnection(event string, details map[string]interface{}) {
+	l.log(INFO, event, details, nil, nil, 0)
+}
+
+// LogPairSwitch logs when user switches trading pairs
+func (l *Logger) LogPairSwitch(oldPair, newPair string) {
+	l.log(INFO, "Pair switch", map[string]interface{}{
+		"from": oldPair,
+		"to":   newPair,
+	}, nil, nil, 0)
+}
+
 func Close() {
 	if globalLogger != nil && globalLogger.file != nil {
 		globalLogger.file.Close()

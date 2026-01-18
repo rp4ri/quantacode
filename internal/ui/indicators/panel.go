@@ -78,31 +78,49 @@ func (p Panel) View(vals domainindicators.AggregatedValues) string {
 
 func (p Panel) renderCurrentValues(vals domainindicators.AggregatedValues) string {
     labelStyle := lipgloss.NewStyle().Foreground(dimText)
+    warmingStyle := lipgloss.NewStyle().Foreground(dimText).Italic(true)
     
-    rsiStyle := lipgloss.NewStyle().Bold(true)
-    rsiLabel := "RSI"
-    switch {
-    case vals.RSI >= 70:
-        rsiStyle = rsiStyle.Foreground(redColor)
-        rsiLabel = "RSI ⚠"
-    case vals.RSI <= 30 && vals.RSI != 0:
-        rsiStyle = rsiStyle.Foreground(blueColor)
-        rsiLabel = "RSI ⚠"
-    default:
-        rsiStyle = rsiStyle.Foreground(lipgloss.Color("#FFFFFF"))
-    }
+    // Check if indicators are still warming up (RSI=0 and SMA=0 means not enough data)
+    isWarmingUp := vals.RSI == 0 && vals.SMA == 0
+    
+    var rsiLine, smaLine, emaLine string
+    
+    if isWarmingUp {
+        rsiLine = fmt.Sprintf("%s %s", 
+            labelStyle.Render("RSI:"),
+            warmingStyle.Render("calentando..."))
+        smaLine = fmt.Sprintf("%s %s",
+            labelStyle.Render("SMA:"),
+            warmingStyle.Render("calentando..."))
+        emaLine = fmt.Sprintf("%s %s",
+            labelStyle.Render("EMA:"),
+            warmingStyle.Render("calentando..."))
+    } else {
+        rsiStyle := lipgloss.NewStyle().Bold(true)
+        rsiLabel := "RSI"
+        switch {
+        case vals.RSI >= 70:
+            rsiStyle = rsiStyle.Foreground(redColor)
+            rsiLabel = "RSI ⚠"
+        case vals.RSI <= 30 && vals.RSI > 0:
+            rsiStyle = rsiStyle.Foreground(blueColor)
+            rsiLabel = "RSI ⚠"
+        default:
+            rsiStyle = rsiStyle.Foreground(lipgloss.Color("#FFFFFF"))
+        }
 
-    rsiLine := fmt.Sprintf("%s %s", 
-        labelStyle.Render(rsiLabel+":"),
-        rsiStyle.Render(fmt.Sprintf("%.2f", vals.RSI)))
-    
-    smaLine := fmt.Sprintf("%s %s",
-        labelStyle.Render("SMA:"),
-        lipgloss.NewStyle().Foreground(greenColor).Render(fmt.Sprintf("%.2f", vals.SMA)))
-    
-    emaLine := fmt.Sprintf("%s %s",
-        labelStyle.Render("EMA:"),
-        lipgloss.NewStyle().Foreground(purpleColor).Render(fmt.Sprintf("%.2f", vals.EMA)))
+        rsiLine = fmt.Sprintf("%s %s", 
+            labelStyle.Render(rsiLabel+":"),
+            rsiStyle.Render(fmt.Sprintf("%.2f", vals.RSI)))
+        
+        smaLine = fmt.Sprintf("%s %s",
+            labelStyle.Render("SMA:"),
+            lipgloss.NewStyle().Foreground(greenColor).Render(fmt.Sprintf("%.2f", vals.SMA)))
+        
+        emaLine = fmt.Sprintf("%s %s",
+            labelStyle.Render("EMA:"),
+            lipgloss.NewStyle().Foreground(purpleColor).Render(fmt.Sprintf("%.2f", vals.EMA)))
+    }
 
     return lipgloss.JoinVertical(lipgloss.Left, rsiLine, smaLine, emaLine)
 }
