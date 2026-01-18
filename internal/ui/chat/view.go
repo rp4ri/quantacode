@@ -1,0 +1,577 @@
+package chat
+
+import (
+    "context"
+    "fmt"
+    "math"
+    "strings"
+    "time"
+
+    "github.com/charmbracelet/bubbles/textarea"
+    "github.com/charmbracelet/bubbles/viewport"
+    tea "github.com/charmbracelet/bubbletea"
+    "github.com/charmbracelet/lipgloss"
+
+    "github.com/yourusername/quantacode/internal/ai/openrouter"
+    domainindicators "github.com/yourusername/quantacode/internal/domain/indicators"
+    grpcclient "github.com/yourusername/quantacode/internal/grpc/client"
+    "github.com/yourusername/quantacode/internal/logging"
+    indicatorpanel "github.com/yourusername/quantacode/internal/ui/indicators"
+)
+
+const (
+    brandName = "QuantaCode"
+)
+
+// Config contains runtime configuration for the chat UI.
+type Config struct {
+    ServerAddr    string
+    Symbol        string
+    OpenRouterKey string
+}
+
+// Run starts the Bubble Tea program for the chat UI.
+func Run(ctx context.Context, cfg Config) error {
+    _ = logging.Init("logs/quantacode.log", logging.DEBUG)
+    defer logging.Close()
+
+    logger := logging.GetLogger("chat-ui")
+    logger.Info("Starting chat UI")
+
+    panel := indicatorpanel.NewPanel()
+    model := newModel(cfg, panel)
+
+    program := tea.NewProgram(model, tea.WithAltScreen(), tea.WithContext(ctx))
+    _, err := program.Run()
+    return err
+}
+
+// ------ Bubble Tea model ------
+
+type model struct {
+    cfg          Config
+    textarea     textarea.Model
+    viewport     viewport.Model
+    messages     []chatMessage
+    typing       bool
+    typingFrame  int
+    ready        bool
+    width        int
+    height       int
+    currentPrice float64
+    priceChange  float64
+    prevPrice    float64
+
+    indicatorValues domainindicators.AggregatedValues
+    panel           indicatorpanel.Panel
+
+    grpcClient  *grpcclient.Client
+    connected   bool
+    priceCh     chan grpcclient.PriceUpdate
+    indicatorCh chan grpcclient.IndicatorUpdate
+
+    aiClient        *openrouter.Client
+    streamingMsg    string
+    aiStreamCh      <-chan openrouter.StreamChunk
+    logger          *logging.Logger
+}
+
+type chatMessage struct {
+    author    string
+    content   string
+    timestamp time.Time
+}
+
+func newModel(cfg Config, panel indicatorpanel.Panel) model {
+    ti := textarea.New()
+    ti.Placeholder = "Escribe tu pregunta..."
+    ti.Focus()
+    ti.Prompt = "› "
+    ti.CharLimit = 500
+    ti.SetHeight(1)
+    ti.ShowLineNumbers = false
+    ti.FocusedStyle.CursorLine = lipgloss.NewStyle()
+    ti.BlurredStyle.CursorLine = lipgloss.NewStyle()
+    ti.FocusedStyle.Base = lipgloss.NewStyle()
+    ti.BlurredStyle.Base = lipgloss.NewStyle()
+
+    vp := viewport.New(80, 20)
+    vp.Style = lipgloss.NewStyle()
+
+    var aiClient *openrouter.Client
+    if cfg.OpenRouterKey != "" {
+        aiClient = openrouter.NewClient(cfg.OpenRouterKey)
+    }
+
+    return model{
+        cfg:          cfg,
+        textarea:     ti,
+        viewport:     vp,
+        panel:        panel,
+        currentPrice: 0,
+        aiClient:     aiClient,
+        logger:       logging.GetLogger("chat-model"),
+    }
+}
+
+func (m model) Init() tea.Cmd {
+    return tea.Batch(connectCmd(m.cfg.ServerAddr, m.cfg.Symbol), typingTickerCmd())
+}
+
+type priceUpdateMsg struct {
+    price  float64
+    symbol string
+}
+type indicatorUpdateMsg struct {
+    rsi        float64
+    sma        float64
+    ema        float64
+    rsiHistory []float64
+    smaHistory []float64
+    emaHistory []float64
+}
+type typingTickMsg struct{}
+type aiResponseMsg struct {
+    content string
+}
+type errMsg struct {
+    err error
+}
+type connectedMsg struct {
+    client *grpcclient.Client
+}
+
+func connectCmd(serverAddr, symbol string) tea.Cmd {
+    return func() tea.Msg {
+        client, err := grpcclient.New(serverAddr)
+        if err != nil {
+            return errMsg{err: fmt.Errorf("connect: %w", err)}
+        }
+        return connectedMsg{client: client}
+    }
+}
+
+func typingTickerCmd() tea.Cmd {
+    return tea.Tick(500*time.Millisecond, func(time.Time) tea.Msg {
+        return typingTickMsg{}
+    })
+}
+
+type aiStreamChunkMsg struct {
+    content  string
+    done     bool
+    err      error
+    streamCh <-chan openrouter.StreamChunk
+}
+
+func startAIStreamCmd(client *openrouter.Client, prompt, symbol string, price, rsi, sma, ema float64) tea.Cmd {
+    return func() tea.Msg {
+        if client == nil {
+            return aiStreamChunkMsg{content: "Error: API key no configurada", done: true}
+        }
+
+        ctx := context.Background()
+        chunkCh, err := client.StreamAnalysis(ctx, prompt, symbol, price, rsi, sma, ema)
+        if err != nil {
+            return aiStreamChunkMsg{err: err, done: true}
+        }
+
+        chunk, ok := <-chunkCh
+        if !ok {
+            return aiStreamChunkMsg{done: true}
+        }
+        return aiStreamChunkMsg{content: chunk.Content, done: chunk.Done, err: chunk.Error, streamCh: chunkCh}
+    }
+}
+
+func continueAIStreamCmd(chunkCh <-chan openrouter.StreamChunk) tea.Cmd {
+    return func() tea.Msg {
+        chunk, ok := <-chunkCh
+        if !ok {
+            return aiStreamChunkMsg{done: true}
+        }
+        return aiStreamChunkMsg{content: chunk.Content, done: chunk.Done, err: chunk.Error, streamCh: chunkCh}
+    }
+}
+
+type startStreamMsg struct {
+    priceCh     chan grpcclient.PriceUpdate
+    indicatorCh chan grpcclient.IndicatorUpdate
+}
+
+func startStreamCmd(client *grpcclient.Client, symbol string) tea.Cmd {
+    return func() tea.Msg {
+        priceCh := make(chan grpcclient.PriceUpdate, 100)
+        indicatorCh := make(chan grpcclient.IndicatorUpdate, 100)
+
+        go func() {
+            _ = client.StreamPrices(context.Background(), symbol, priceCh, indicatorCh)
+        }()
+
+        return startStreamMsg{priceCh: priceCh, indicatorCh: indicatorCh}
+    }
+}
+
+func waitForUpdateCmd(priceCh <-chan grpcclient.PriceUpdate, indicatorCh <-chan grpcclient.IndicatorUpdate) tea.Cmd {
+    return func() tea.Msg {
+        select {
+        case p, ok := <-priceCh:
+            if !ok {
+                return errMsg{err: fmt.Errorf("price channel closed")}
+            }
+            return priceUpdateMsg{price: p.Price, symbol: p.Symbol}
+        case i, ok := <-indicatorCh:
+            if !ok {
+                return errMsg{err: fmt.Errorf("indicator channel closed")}
+            }
+            return indicatorUpdateMsg{
+                rsi:        i.RSI,
+                sma:        i.SMA,
+                ema:        i.EMA,
+                rsiHistory: i.RSIHistory,
+                smaHistory: i.SMAHistory,
+                emaHistory: i.EMAHistory,
+            }
+        }
+    }
+}
+
+func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+    var cmds []tea.Cmd
+
+    switch msg := msg.(type) {
+    case tea.WindowSizeMsg:
+        m.width = msg.Width
+        m.height = msg.Height
+        m.ready = true
+        contentWidth := m.contentWidth()
+        if contentWidth > 0 {
+            m.textarea.SetWidth(contentWidth - 4)
+        }
+        headerHeight := 3
+        inputHeight := 3
+        chatHeight := m.height - headerHeight - inputHeight - 2
+        if chatHeight < 5 {
+            chatHeight = 5
+        }
+        m.viewport.Width = contentWidth - 2
+        m.viewport.Height = chatHeight
+        m.updateViewportContent()
+
+    case tea.KeyMsg:
+        switch msg.Type {
+        case tea.KeyCtrlC, tea.KeyEsc:
+            return m, tea.Quit
+        case tea.KeyEnter:
+            if m.typing {
+                break
+            }
+            input := strings.TrimSpace(m.textarea.Value())
+            if input == "" {
+                break
+            }
+            m.logger.LogIO("User input", input, nil, 0)
+            m.messages = append(m.messages, chatMessage{author: "Tú", content: input, timestamp: time.Now()})
+            m.textarea.Reset()
+            m.typing = true
+            m.streamingMsg = ""
+            cmds = append(cmds, startAIStreamCmd(m.aiClient, input, m.cfg.Symbol, m.currentPrice, m.indicatorValues.RSI, m.indicatorValues.SMA, m.indicatorValues.EMA))
+        default:
+            var cmd tea.Cmd
+            m.textarea, cmd = m.textarea.Update(msg)
+            cmds = append(cmds, cmd)
+        }
+
+    case tea.MouseMsg:
+        var cmd tea.Cmd
+        m.textarea, cmd = m.textarea.Update(msg)
+        cmds = append(cmds, cmd)
+
+    case connectedMsg:
+        m.grpcClient = msg.client
+        m.connected = true
+        m.messages = append(m.messages, chatMessage{author: "Sistema", content: fmt.Sprintf("Conectado a %s (par %s)", m.cfg.ServerAddr, m.cfg.Symbol), timestamp: time.Now()})
+        cmds = append(cmds, startStreamCmd(m.grpcClient, m.cfg.Symbol))
+
+    case startStreamMsg:
+        m.priceCh = msg.priceCh
+        m.indicatorCh = msg.indicatorCh
+        cmds = append(cmds, waitForUpdateCmd(m.priceCh, m.indicatorCh))
+
+    case priceUpdateMsg:
+        m.prevPrice = m.currentPrice
+        m.currentPrice = msg.price
+        m.priceChange = m.currentPrice - m.prevPrice
+        if m.priceCh != nil {
+            cmds = append(cmds, waitForUpdateCmd(m.priceCh, m.indicatorCh))
+        }
+
+    case indicatorUpdateMsg:
+        m.indicatorValues = domainindicators.AggregatedValues{
+            RSI: msg.rsi,
+            SMA: msg.sma,
+            EMA: msg.ema,
+        }
+        history := domainindicators.IndicatorHistory{
+            RSI: msg.rsiHistory,
+            SMA: msg.smaHistory,
+            EMA: msg.emaHistory,
+        }
+        m.panel = m.panel.WithHistory(history)
+        if m.priceCh != nil {
+            cmds = append(cmds, waitForUpdateCmd(m.priceCh, m.indicatorCh))
+        }
+
+    case typingTickMsg:
+        if m.typing {
+            m.typingFrame = (m.typingFrame + 1) % len(typingFrames)
+        }
+        cmds = append(cmds, typingTickerCmd())
+
+    case aiStreamChunkMsg:
+        if msg.err != nil {
+            m.typing = false
+            m.messages = append(m.messages, chatMessage{author: "Error", content: msg.err.Error(), timestamp: time.Now()})
+            m.streamingMsg = ""
+            m.aiStreamCh = nil
+        } else if msg.done {
+            m.typing = false
+            m.typingFrame = 0
+            if m.streamingMsg != "" {
+                m.messages = append(m.messages, chatMessage{author: brandName, content: m.streamingMsg, timestamp: time.Now()})
+                m.logger.LogIO("AI response complete", nil, m.streamingMsg, 0)
+            }
+            m.streamingMsg = ""
+            m.aiStreamCh = nil
+        } else {
+            m.streamingMsg += msg.content
+            m.aiStreamCh = msg.streamCh
+            if msg.streamCh != nil {
+                cmds = append(cmds, continueAIStreamCmd(msg.streamCh))
+            }
+        }
+
+    case errMsg:
+        m.messages = append(m.messages, chatMessage{author: "Error", content: msg.err.Error(), timestamp: time.Now()})
+        m.typing = false
+        m.typingFrame = 0
+    }
+
+    m.panel = m.panel.WithWidth(m.panelWidth())
+    m.updateViewportContent()
+    return m, tea.Batch(cmds...)
+}
+
+var typingFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+var (
+    subtle    = lipgloss.AdaptiveColor{Light: "#D9DCCF", Dark: "#383838"}
+    highlight = lipgloss.AdaptiveColor{Light: "#874BFD", Dark: "#7D56F4"}
+    special   = lipgloss.AdaptiveColor{Light: "#43BF6D", Dark: "#73F59F"}
+    dimText   = lipgloss.Color("#666666")
+    userColor = lipgloss.Color("#6CB6FF")
+    aiColor   = lipgloss.Color("#D4A5FF")
+    errColor  = lipgloss.Color("#FF6B6B")
+    sysColor  = lipgloss.Color("#73F59F")
+)
+
+func (m *model) updateViewportContent() {
+    content := m.buildChatContent()
+    m.viewport.SetContent(content)
+    m.viewport.GotoBottom()
+}
+
+func (m model) buildChatContent() string {
+    if len(m.messages) == 0 && m.streamingMsg == "" {
+        return lipgloss.NewStyle().
+            Foreground(dimText).
+            Italic(true).
+            Render("\n  Escribe una pregunta sobre el mercado para comenzar el análisis...\n")
+    }
+
+    var builder strings.Builder
+    width := m.viewport.Width - 2
+
+    for _, msg := range m.messages {
+        builder.WriteString(m.formatMessage(msg, width))
+        builder.WriteString("\n")
+    }
+
+    if m.streamingMsg != "" {
+        streamHeader := lipgloss.NewStyle().
+            Bold(true).
+            Foreground(aiColor).
+            Render(brandName)
+        timestamp := lipgloss.NewStyle().
+            Foreground(dimText).
+            Render(" • " + time.Now().Format("15:04:05"))
+        builder.WriteString("\n" + streamHeader + timestamp + "\n")
+        
+        streamContent := lipgloss.NewStyle().
+            Width(width).
+            Foreground(lipgloss.Color("#FFFFFF")).
+            Render(m.streamingMsg)
+        builder.WriteString(streamContent)
+        
+        if m.typing {
+            cursor := lipgloss.NewStyle().
+                Foreground(aiColor).
+                Render("▋")
+            builder.WriteString(cursor)
+        }
+        builder.WriteString("\n")
+    }
+
+    return builder.String()
+}
+
+func (m model) formatMessage(msg chatMessage, width int) string {
+    var authorStyle lipgloss.Style
+    switch msg.author {
+    case brandName:
+        authorStyle = lipgloss.NewStyle().Bold(true).Foreground(aiColor)
+    case "Tú":
+        authorStyle = lipgloss.NewStyle().Bold(true).Foreground(userColor)
+    case "Error":
+        authorStyle = lipgloss.NewStyle().Bold(true).Foreground(errColor)
+    case "Sistema":
+        authorStyle = lipgloss.NewStyle().Bold(true).Foreground(sysColor)
+    default:
+        authorStyle = lipgloss.NewStyle().Bold(true).Foreground(userColor)
+    }
+
+    header := authorStyle.Render(msg.author)
+    timestamp := lipgloss.NewStyle().Foreground(dimText).Render(" • " + msg.timestamp.Format("15:04:05"))
+    
+    content := lipgloss.NewStyle().
+        Width(width).
+        Render(msg.content)
+
+    return "\n" + header + timestamp + "\n" + content
+}
+
+func (m model) View() string {
+    if !m.ready {
+        return lipgloss.NewStyle().
+            Foreground(dimText).
+            Render(" Cargando " + brandName + "...")
+    }
+
+    contentWidth := m.contentWidth()
+    
+    headerView := m.renderHeader(contentWidth)
+    chatView := m.viewport.View()
+    typingView := m.renderTyping()
+    inputView := m.renderInput(contentWidth)
+
+    leftContent := lipgloss.JoinVertical(lipgloss.Left,
+        headerView,
+        chatView,
+        typingView,
+        inputView,
+    )
+    
+    leftBox := lipgloss.NewStyle().
+        Width(contentWidth).
+        Height(m.height).
+        Render(leftContent)
+    
+    panelView := m.panel.View(m.indicatorValues)
+
+    return lipgloss.JoinHorizontal(lipgloss.Top, leftBox, panelView)
+}
+
+func (m model) renderHeader(width int) string {
+    logo := lipgloss.NewStyle().
+        Bold(true).
+        Foreground(highlight).
+        Render("◆ " + brandName)
+    
+    var statusIcon, statusText string
+    if m.connected {
+        statusIcon = lipgloss.NewStyle().Foreground(sysColor).Render("●")
+        statusText = lipgloss.NewStyle().Foreground(dimText).Render(" conectado")
+    } else {
+        statusIcon = lipgloss.NewStyle().Foreground(errColor).Render("○")
+        statusText = lipgloss.NewStyle().Foreground(dimText).Render(" desconectado")
+    }
+    
+    symbol := lipgloss.NewStyle().
+        Bold(true).
+        Foreground(lipgloss.Color("#FFFFFF")).
+        Render(m.cfg.Symbol)
+    
+    priceStyle := lipgloss.NewStyle().Bold(true)
+    changeStr := ""
+    if m.priceChange > 0 {
+        priceStyle = priceStyle.Foreground(sysColor)
+        changeStr = fmt.Sprintf(" ↑%.2f", m.priceChange)
+    } else if m.priceChange < 0 {
+        priceStyle = priceStyle.Foreground(errColor)
+        changeStr = fmt.Sprintf(" ↓%.2f", math.Abs(m.priceChange))
+    }
+    price := priceStyle.Render(fmt.Sprintf("$%.2f%s", m.currentPrice, changeStr))
+    
+    left := logo + "  " + statusIcon + statusText
+    right := symbol + " " + price
+    
+    gap := width - lipgloss.Width(left) - lipgloss.Width(right) - 2
+    if gap < 1 {
+        gap = 1
+    }
+    
+    header := left + strings.Repeat(" ", gap) + right
+    
+    border := lipgloss.NewStyle().
+        Foreground(subtle).
+        Render(strings.Repeat("─", width))
+    
+    return header + "\n" + border
+}
+
+func (m model) renderInput(width int) string {
+    border := lipgloss.NewStyle().
+        Foreground(subtle).
+        Render(strings.Repeat("─", width))
+    
+    prompt := lipgloss.NewStyle().
+        Foreground(highlight).
+        Render("› ")
+    
+    input := m.textarea.View()
+    
+    return border + "\n" + prompt + input
+}
+
+func (m model) renderTyping() string {
+    if !m.typing || m.streamingMsg != "" {
+        return ""
+    }
+    spinner := typingFrames[m.typingFrame%len(typingFrames)]
+    return lipgloss.NewStyle().
+        Foreground(aiColor).
+        Render("  " + spinner + " " + brandName + " está pensando...")
+}
+
+func (m model) contentWidth() int {
+    panelWidth := m.panelWidth()
+    contentWidth := m.width - panelWidth - 1
+    if contentWidth < 40 {
+        contentWidth = 40
+    }
+    return contentWidth
+}
+
+func (m model) panelWidth() int {
+    if m.width == 0 {
+        return 32
+    }
+    w := m.width / 4
+    if w < 32 {
+        w = 32
+    }
+    if w > 50 {
+        w = 50
+    }
+    return w
+}

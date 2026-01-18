@@ -1,0 +1,61 @@
+# Binaries
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Go specific
+pkg/
+vendor/
+go.work
+go.work.sum
+
+# Environment and secrets
+.env
+.env.*
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# Logs
+logs/
+*.log
+*.out
+
+# Test artifacts
+*.test
+coverage/
+*.coverprofile
+*.prof
+coverage.html
+coverage.txt
+
+# Build artifacts
+dist/
+tmp/
+build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Node (if any frontend)
+node_modules/
+
+# Proto generated (optional - uncomment if you want to regenerate)
+# proto/*.pb.go
+
+# Debug
+__debug_bin*
+debug.test

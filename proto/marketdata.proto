@@ -1,0 +1,44 @@
+syntax = "proto3";
+
+package marketdata;
+
+option go_package = "github.com/yourusername/quantacode/proto";
+
+service MarketDataService {
+  rpc StreamPrices(StreamRequest) returns (stream MarketUpdate);
+}
+
+message StreamRequest {
+  string symbol = 1;
+  IndicatorConfig indicators = 2;
+}
+
+message IndicatorConfig {
+  int32 rsi_period = 1;
+  int32 sma_period = 2;
+  int32 ema_period = 3;
+}
+
+message MarketUpdate {
+  oneof update {
+    PriceUpdate price = 1;
+    IndicatorUpdate indicators = 2;
+  }
+}
+
+message PriceUpdate {
+  string symbol = 1;
+  double price = 2;
+  double volume = 3;
+  int64 timestamp = 4;
+}
+
+message IndicatorUpdate {
+  double rsi = 1;
+  double sma = 2;
+  double ema = 3;
+  int64 timestamp = 4;
+  repeated double rsi_history = 5;
+  repeated double sma_history = 6;
+  repeated double ema_history = 7;
+}

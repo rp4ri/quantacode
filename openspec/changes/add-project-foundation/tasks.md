@@ -1,5 +1,5 @@
 ## 1. Project Initialization
-- [ ] 1.1 Initialize Go module with `go mod init github.com/yourusername/quantacode`
+- [x] 1.1 Initialize Go module with `go mod init github.com/yourusername/quantacode`
 - [ ] 1.2 Create directory structure: cmd/server, cmd/cli, internal/domain, internal/infra
 - [ ] 1.3 Create Go .gitignore (bin/, pkg/, .env, vendor/)
 - [ ] 1.4 Create README.md with project description

@@ -71,6 +71,7 @@ quantacode/
 - **Context Propagation**: Use `context.Context` for cancellation
 
 ### Testing Strategy
+- Place all test files under a dedicated `tests/` folder within each package/module (e.g., `internal/domain/indicators/tests`), using the external package convention where practical.
 - Unit tests for indicator calculations (table-driven tests)
 - Integration tests for gRPC endpoints
 - Mock external APIs using interfaces
