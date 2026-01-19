@@ -5,7 +5,7 @@ import (
     "strings"
 
     "github.com/charmbracelet/lipgloss"
-    domainindicators "github.com/yourusername/quantacode/internal/domain/indicators"
+    domainindicators "github.com/rp4ri/quantacode/internal/domain/indicators"
 )
 
 var (

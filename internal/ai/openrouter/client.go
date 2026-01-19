@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yourusername/quantacode/internal/logging"
+	"github.com/rp4ri/quantacode/internal/logging"
 )
 
 const (

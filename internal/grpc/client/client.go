@@ -10,7 +10,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	pb "github.com/yourusername/quantacode/proto"
+	pb "github.com/rp4ri/quantacode/proto"
 )
 
 // PriceUpdate represents a price tick.

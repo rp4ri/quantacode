@@ -4,7 +4,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/yourusername/quantacode/internal/domain/indicators"
+	"github.com/rp4ri/quantacode/internal/domain/indicators"
 )
 
 func TestSMA(t *testing.T) {

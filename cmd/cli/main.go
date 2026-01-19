@@ -9,7 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/yourusername/quantacode/internal/ui/chat"
+	"github.com/rp4ri/quantacode/internal/ui/chat"
 )
 
 func main() {

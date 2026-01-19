@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package marketdata;
 
-option go_package = "github.com/yourusername/quantacode/proto";
+option go_package = "github.com/rp4ri/quantacode/proto";
 
 service MarketDataService {
   rpc StreamPrices(StreamRequest) returns (stream MarketUpdate);

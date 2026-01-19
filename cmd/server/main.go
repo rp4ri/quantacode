@@ -13,8 +13,8 @@ import (
 
 	"google.golang.org/grpc"
 
-	"github.com/yourusername/quantacode/internal/grpc/server"
-	pb "github.com/yourusername/quantacode/proto"
+	"github.com/rp4ri/quantacode/internal/grpc/server"
+	pb "github.com/rp4ri/quantacode/proto"
 )
 
 func main() {

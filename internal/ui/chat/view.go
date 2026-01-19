@@ -12,11 +12,11 @@ import (
     tea "github.com/charmbracelet/bubbletea"
     "github.com/charmbracelet/lipgloss"
 
-    "github.com/yourusername/quantacode/internal/ai/openrouter"
-    domainindicators "github.com/yourusername/quantacode/internal/domain/indicators"
-    grpcclient "github.com/yourusername/quantacode/internal/grpc/client"
-    "github.com/yourusername/quantacode/internal/logging"
-    indicatorpanel "github.com/yourusername/quantacode/internal/ui/indicators"
+    "github.com/rp4ri/quantacode/internal/ai/openrouter"
+    domainindicators "github.com/rp4ri/quantacode/internal/domain/indicators"
+    grpcclient "github.com/rp4ri/quantacode/internal/grpc/client"
+    "github.com/rp4ri/quantacode/internal/logging"
+    indicatorpanel "github.com/rp4ri/quantacode/internal/ui/indicators"
 )
 
 const (

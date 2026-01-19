@@ -6,9 +6,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/yourusername/quantacode/internal/domain/indicators"
-	"github.com/yourusername/quantacode/internal/infra/binance"
-	pb "github.com/yourusername/quantacode/proto"
+	"github.com/rp4ri/quantacode/internal/domain/indicators"
+	"github.com/rp4ri/quantacode/internal/infra/binance"
+	pb "github.com/rp4ri/quantacode/proto"
 )
 
 // Handler implements the MarketDataService gRPC server.

@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-func TestParseTicker(t *testing.T) {
+func TestParseCombinedStream(t *testing.T) {
 	tests := []struct {
 		name      string
 		input     string
@@ -15,18 +15,18 @@ func TestParseTicker(t *testing.T) {
 		wantErr   bool
 	}{
 		{
-			name:      "binance.us real format",
-			input:     `{"e":"24hrTicker","E":1768723460936,"s":"BTCUSDT","p":"-100.12000000","P":"-0.105","w":"95305.95535979","x":"95086.81000000","c":"95038.26000000","Q":"0.00021000","b":"95034.50000000","B":"0.05263000","a":"95034.63000000","A":"0.04052000","o":"95138.38000000","h":"95642.81000000","l":"94800.04000000","v":"16.80704000","q":"1601811.00397020","O":1768637060935,"C":1768723460935,"F":31019297,"L":31020323,"n":1027}`,
+			name:      "miniTicker stream",
+			input:     `{"stream":"btcusdt@miniTicker","data":{"e":"24hrMiniTicker","E":1768723460936,"s":"btcusdt","c":"95038.26","o":"95138.38","h":"95642.81","l":"94800.04","v":"16.80704","q":"1601811.00"}}`,
 			wantPrice: 95038.26,
 			wantVol:   16.80704,
 			wantSym:   "BTCUSDT",
 			wantErr:   false,
 		},
 		{
-			name:      "binance.com format",
-			input:     `{"e":"24hrTicker","E":1705574400000,"s":"ETHUSDT","c":"2500.00","v":"500.00"}`,
+			name:      "aggTrade stream",
+			input:     `{"stream":"ethusdt@aggTrade","data":{"e":"aggTrade","E":1705574400000,"s":"ethusdt","a":12345,"p":"2500.00","q":"0.5","f":100,"l":105,"T":1705574400000,"m":true}}`,
 			wantPrice: 2500.00,
-			wantVol:   500.00,
+			wantVol:   0.5,
 			wantSym:   "ETHUSDT",
 			wantErr:   false,
 		},
@@ -36,13 +36,13 @@ func TestParseTicker(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name:    "wrong event type",
-			input:   `{"e":"trade","E":1705574400000,"s":"BTCUSDT","c":"50000.00","v":"100.00"}`,
+			name:    "unknown stream type",
+			input:   `{"stream":"btcusdt@unknown","data":{}}`,
 			wantErr: true,
 		},
 		{
 			name:      "zero timestamp uses current time",
-			input:     `{"e":"24hrTicker","E":0,"s":"XRPUSDT","c":"0.50","v":"1000.00"}`,
+			input:     `{"stream":"xrpusdt@miniTicker","data":{"e":"24hrMiniTicker","E":0,"s":"xrpusdt","c":"0.50","o":"0.49","h":"0.51","l":"0.48","v":"1000.00","q":"500.00"}}`,
 			wantPrice: 0.50,
 			wantVol:   1000.00,
 			wantSym:   "XRPUSDT",
@@ -52,22 +52,22 @@ func TestParseTicker(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := parseTicker([]byte(tt.input))
+			got, err := parseCombinedStream([]byte(tt.input))
 			if (err != nil) != tt.wantErr {
-				t.Errorf("parseTicker() error = %v, wantErr %v", err, tt.wantErr)
+				t.Errorf("parseCombinedStream() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
 			if tt.wantErr {
 				return
 			}
 			if got.Price != tt.wantPrice {
-				t.Errorf("parseTicker() Price = %v, want %v", got.Price, tt.wantPrice)
+				t.Errorf("parseCombinedStream() Price = %v, want %v", got.Price, tt.wantPrice)
 			}
 			if got.Volume != tt.wantVol {
-				t.Errorf("parseTicker() Volume = %v, want %v", got.Volume, tt.wantVol)
+				t.Errorf("parseCombinedStream() Volume = %v, want %v", got.Volume, tt.wantVol)
 			}
 			if got.Symbol != tt.wantSym {
-				t.Errorf("parseTicker() Symbol = %v, want %v", got.Symbol, tt.wantSym)
+				t.Errorf("parseCombinedStream() Symbol = %v, want %v", got.Symbol, tt.wantSym)
 			}
 		})
 	}
