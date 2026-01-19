@@ -2,6 +2,8 @@
 
 QuantaCode is an AI-assisted cryptocurrency trading analysis tool that streams live market data from Binance, computes technical indicators (RSI, SMA, EMA), and provides an interactive terminal UI with AI-powered analysis via OpenRouter.
 
+![Screenshot](https://github.com/rp4ri/quantacode/blob/main/assets/example-short.png)
+
 ## Features
 
 - **Real-time price streaming** from Binance (US and global endpoints)
