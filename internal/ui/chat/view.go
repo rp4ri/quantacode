@@ -20,7 +20,11 @@ import (
 )
 
 const (
-    brandName = "QuantaCode"
+    brandName           = "QuantaCode"
+    maxChatMessages     = 500
+    maxInputHistory     = 100
+    typingTickInterval  = 500 * time.Millisecond
+    channelBufferSize   = 100
 )
 
 var availablePairs = []string{
@@ -55,9 +59,10 @@ func Run(ctx context.Context, cfg Config) error {
     logger.Info("Starting chat UI")
 
     panel := indicatorpanel.NewPanel()
-    model := newModel(cfg, panel)
+    m := newModel(cfg, panel)
+    m.programCtx = ctx // Store program context for cancellation propagation
 
-    program := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithContext(ctx))
+    program := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithContext(ctx))
     _, err := program.Run()
     return err
 }
@@ -98,6 +103,12 @@ type model struct {
     pairSelectIndex   int
     showSlashMenu     bool
     slashMenuIndex    int
+    
+    // Optimizations
+    chatDirty      bool                   // Flag to avoid unnecessary re-renders
+    streamCtx      context.Context        // Context for current stream
+    streamCancel   context.CancelFunc     // Cancel function for stream
+    programCtx     context.Context        // Program-level context
 }
 
 type chatMessage struct {
@@ -179,7 +190,7 @@ func connectCmd(serverAddr, symbol string) tea.Cmd {
 }
 
 func typingTickerCmd() tea.Cmd {
-    return tea.Tick(500*time.Millisecond, func(time.Time) tea.Msg {
+    return tea.Tick(typingTickInterval, func(time.Time) tea.Msg {
         return typingTickMsg{}
     })
 }
@@ -191,13 +202,13 @@ type aiStreamChunkMsg struct {
     streamCh <-chan openrouter.StreamChunk
 }
 
-func startAIStreamCmd(client *openrouter.Client, prompt, symbol string, price, rsi, sma, ema float64, history *openrouter.IndicatorHistory) tea.Cmd {
+func startAIStreamCmd(client *openrouter.Client, ctx context.Context, prompt, symbol string, price, rsi, sma, ema float64, history *openrouter.IndicatorHistory) tea.Cmd {
     return func() tea.Msg {
         if client == nil {
             return aiStreamChunkMsg{content: "Error: API key no configurada", done: true}
         }
 
-        ctx := context.Background()
+        // Use provided context for proper cancellation on program exit
         chunkCh, err := client.StreamAnalysis(ctx, prompt, symbol, price, rsi, sma, ema, history)
         if err != nil {
             return aiStreamChunkMsg{err: err, done: true}
@@ -226,13 +237,15 @@ type startStreamMsg struct {
     indicatorCh chan grpcclient.IndicatorUpdate
 }
 
-func startStreamCmd(client *grpcclient.Client, symbol string) tea.Cmd {
+func startStreamCmd(client *grpcclient.Client, symbol string, ctx context.Context) tea.Cmd {
     return func() tea.Msg {
-        priceCh := make(chan grpcclient.PriceUpdate, 100)
-        indicatorCh := make(chan grpcclient.IndicatorUpdate, 100)
+        priceCh := make(chan grpcclient.PriceUpdate, channelBufferSize)
+        indicatorCh := make(chan grpcclient.IndicatorUpdate, channelBufferSize)
 
         go func() {
-            _ = client.StreamPrices(context.Background(), symbol, priceCh, indicatorCh)
+            _ = client.StreamPrices(ctx, symbol, priceCh, indicatorCh)
+            close(priceCh)
+            close(indicatorCh)
         }()
 
         return startStreamMsg{priceCh: priceCh, indicatorCh: indicatorCh}
@@ -304,6 +317,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
                 oldPair := m.cfg.Symbol
                 m.showPairSelect = false
                 m.cfg.Symbol = selectedPair
+                
+                // Cancel previous stream to prevent goroutine/channel leak
+                if m.streamCancel != nil {
+                    m.streamCancel()
+                }
+                
                 // Reset price and indicators for new pair
                 m.currentPrice = 0
                 m.prevPrice = 0
@@ -313,9 +332,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
                 m.priceCh = nil
                 m.indicatorCh = nil
                 m.logger.LogPairSwitch(oldPair, selectedPair)
-                m.messages = append(m.messages, chatMessage{author: "Sistema", content: fmt.Sprintf("Cambiando a par: %s", strings.ToUpper(selectedPair)), timestamp: time.Now()})
+                m.addMessage(chatMessage{author: "Sistema", content: fmt.Sprintf("Cambiando a par: %s", strings.ToUpper(selectedPair)), timestamp: time.Now()})
+                m.chatDirty = true
+                
+                // Create new context for new stream
                 if m.grpcClient != nil {
-                    cmds = append(cmds, startStreamCmd(m.grpcClient, selectedPair))
+                    m.streamCtx, m.streamCancel = context.WithCancel(m.programCtx)
+                    cmds = append(cmds, startStreamCmd(m.grpcClient, selectedPair, m.streamCtx))
                 }
             }
             break
@@ -400,20 +423,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
                     m.textarea.Reset()
                     break
                 default:
-                    m.messages = append(m.messages, chatMessage{author: "Sistema", content: "Comandos disponibles: /clear, /pairs", timestamp: time.Now()})
+                    m.addMessage(chatMessage{author: "Sistema", content: "Comandos disponibles: /clear, /pairs", timestamp: time.Now()})
+                    m.chatDirty = true
                     m.textarea.Reset()
                 }
                 break
             }
             
-            m.inputHistory = append(m.inputHistory, input)
-            m.historyIndex = len(m.inputHistory)
+            m.addToInputHistory(input)
             m.logger.LogIO("User input", input, nil, 0)
-            m.messages = append(m.messages, chatMessage{author: "Tú", content: input, timestamp: time.Now()})
+            m.addMessage(chatMessage{author: "Tú", content: input, timestamp: time.Now()})
+            m.chatDirty = true
             m.textarea.Reset()
             m.typing = true
             m.streamingMsg = ""
-            cmds = append(cmds, startAIStreamCmd(m.aiClient, input, m.cfg.Symbol, m.currentPrice, m.indicatorValues.RSI, m.indicatorValues.SMA, m.indicatorValues.EMA, m.indicatorHistory))
+            cmds = append(cmds, startAIStreamCmd(m.aiClient, m.programCtx, input, m.cfg.Symbol, m.currentPrice, m.indicatorValues.RSI, m.indicatorValues.SMA, m.indicatorValues.EMA, m.indicatorHistory))
         default:
             var cmd tea.Cmd
             m.textarea, cmd = m.textarea.Update(msg)
@@ -433,7 +457,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         }
 
     case tea.MouseMsg:
-        // Always forward mouse messages to viewport for scroll handling
+        // Block scroll when modals are open
+        if m.showPairSelect || m.showSlashMenu {
+            break
+        }
+        // Forward mouse messages to viewport for scroll handling
         var vpCmd tea.Cmd
         m.viewport, vpCmd = m.viewport.Update(msg)
         cmds = append(cmds, vpCmd)
@@ -441,8 +469,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
     case connectedMsg:
         m.grpcClient = msg.client
         m.connected = true
-        m.messages = append(m.messages, chatMessage{author: "Sistema", content: fmt.Sprintf("Conectado a %s (par %s)", m.cfg.ServerAddr, m.cfg.Symbol), timestamp: time.Now()})
-        cmds = append(cmds, startStreamCmd(m.grpcClient, m.cfg.Symbol))
+        m.addMessage(chatMessage{author: "Sistema", content: fmt.Sprintf("Conectado a %s (par %s)", m.cfg.ServerAddr, m.cfg.Symbol), timestamp: time.Now()})
+        m.chatDirty = true
+        // Create initial stream context
+        m.streamCtx, m.streamCancel = context.WithCancel(m.programCtx)
+        cmds = append(cmds, startStreamCmd(m.grpcClient, m.cfg.Symbol, m.streamCtx))
 
     case startStreamMsg:
         m.priceCh = msg.priceCh
@@ -489,34 +520,44 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
     case aiStreamChunkMsg:
         if msg.err != nil {
             m.typing = false
-            m.messages = append(m.messages, chatMessage{author: "Error", content: msg.err.Error(), timestamp: time.Now()})
+            m.addMessage(chatMessage{author: "Error", content: msg.err.Error(), timestamp: time.Now()})
             m.streamingMsg = ""
             m.aiStreamCh = nil
+            m.chatDirty = true
         } else if msg.done {
             m.typing = false
             m.typingFrame = 0
             if m.streamingMsg != "" {
-                m.messages = append(m.messages, chatMessage{author: brandName, content: m.streamingMsg, timestamp: time.Now()})
+                m.addMessage(chatMessage{author: brandName, content: m.streamingMsg, timestamp: time.Now()})
                 m.logger.LogIO("AI response complete", nil, m.streamingMsg, 0)
+                m.chatDirty = true
             }
             m.streamingMsg = ""
             m.aiStreamCh = nil
         } else {
             m.streamingMsg += msg.content
             m.aiStreamCh = msg.streamCh
+            m.chatDirty = true // Mark dirty during streaming for live updates
             if msg.streamCh != nil {
                 cmds = append(cmds, continueAIStreamCmd(msg.streamCh))
             }
         }
 
     case errMsg:
-        m.messages = append(m.messages, chatMessage{author: "Error", content: msg.err.Error(), timestamp: time.Now()})
+        m.addMessage(chatMessage{author: "Error", content: msg.err.Error(), timestamp: time.Now()})
         m.typing = false
         m.typingFrame = 0
+        m.chatDirty = true
     }
 
     m.panel = m.panel.WithWidth(m.panelWidth())
-    m.updateViewportContent()
+    
+    // Only update viewport when chat content changed (dirty state optimization)
+    if m.chatDirty {
+        m.updateViewportContentWithScroll(true)
+        m.chatDirty = false
+    }
+    
     return m, tea.Batch(cmds...)
 }
 
@@ -531,12 +572,45 @@ var (
     aiColor   = lipgloss.Color("#D4A5FF")
     errColor  = lipgloss.Color("#FF6B6B")
     sysColor  = lipgloss.Color("#73F59F")
+    
+    // Pre-compiled styles for performance (avoid creating new styles on each render)
+    authorStyleAI     = lipgloss.NewStyle().Bold(true).Foreground(aiColor)
+    authorStyleUser   = lipgloss.NewStyle().Bold(true).Foreground(userColor)
+    authorStyleError  = lipgloss.NewStyle().Bold(true).Foreground(errColor)
+    authorStyleSystem = lipgloss.NewStyle().Bold(true).Foreground(sysColor)
+    timestampStyle    = lipgloss.NewStyle().Foreground(dimText)
 )
 
+// addMessage adds a message with ring buffer limit to prevent unbounded growth
+func (m *model) addMessage(msg chatMessage) {
+    m.messages = append(m.messages, msg)
+    if len(m.messages) > maxChatMessages {
+        m.messages = m.messages[len(m.messages)-maxChatMessages:]
+    }
+}
+
+// addToInputHistory adds input with ring buffer limit
+func (m *model) addToInputHistory(input string) {
+    m.inputHistory = append(m.inputHistory, input)
+    if len(m.inputHistory) > maxInputHistory {
+        m.inputHistory = m.inputHistory[len(m.inputHistory)-maxInputHistory:]
+    }
+    m.historyIndex = len(m.inputHistory)
+}
+
+// updateViewportContentWithScroll updates viewport and optionally scrolls to bottom
+func (m *model) updateViewportContentWithScroll(autoScroll bool) {
+    content := m.buildChatContent()
+    m.viewport.SetContent(content)
+    if autoScroll {
+        m.viewport.GotoBottom()
+    }
+}
+
+// updateViewportContent updates viewport without auto-scroll (for resize events)
 func (m *model) updateViewportContent() {
     content := m.buildChatContent()
     m.viewport.SetContent(content)
-    m.viewport.GotoBottom()
 }
 
 func (m model) buildChatContent() string {
@@ -584,23 +658,25 @@ func (m model) buildChatContent() string {
 }
 
 func (m model) formatMessage(msg chatMessage, width int) string {
+    // Use pre-compiled styles for performance
     var authorStyle lipgloss.Style
     switch msg.author {
     case brandName:
-        authorStyle = lipgloss.NewStyle().Bold(true).Foreground(aiColor)
+        authorStyle = authorStyleAI
     case "Tú":
-        authorStyle = lipgloss.NewStyle().Bold(true).Foreground(userColor)
+        authorStyle = authorStyleUser
     case "Error":
-        authorStyle = lipgloss.NewStyle().Bold(true).Foreground(errColor)
+        authorStyle = authorStyleError
     case "Sistema":
-        authorStyle = lipgloss.NewStyle().Bold(true).Foreground(sysColor)
+        authorStyle = authorStyleSystem
     default:
-        authorStyle = lipgloss.NewStyle().Bold(true).Foreground(userColor)
+        authorStyle = authorStyleUser
     }
 
     header := authorStyle.Render(msg.author)
-    timestamp := lipgloss.NewStyle().Foreground(dimText).Render(" • " + msg.timestamp.Format("15:04:05"))
+    timestamp := timestampStyle.Render(" • " + msg.timestamp.Format("15:04:05"))
     
+    // Only width needs to be dynamic
     content := lipgloss.NewStyle().
         Width(width).
         Render(msg.content)
